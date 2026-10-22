@@ -2,6 +2,10 @@ Shader "RoomWindow/Glass"
 {
     Properties
     {
+        [Header(Foreground)]
+        _Foreground ("Image", 2D) = "black" {}
+
+        [Header(Glass)]
         _Tint ("Tint", Color) = (0.75, 0.88, 1, 1)
         _Opacity ("Opacity", Range(0, 0.5)) = 0.03
         _ReflectionStrength ("Reflection", Range(0, 1)) = 0.35
@@ -33,46 +37,52 @@ Shader "RoomWindow/Glass"
             #pragma fragment frag
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/EntityLighting.hlsl"
+            #include "RoomWindowPlane.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
+                float4 _Foreground_ST;
                 float4 _Tint;
                 float _Opacity;
                 float _ReflectionStrength;
                 float _FresnelPower;
             CBUFFER_END
 
+            // Opaque texels are the wall and ledges. Clear texels leave the glass, and the room shows through it.
+            TEXTURE2D(_Foreground);
+            SAMPLER(sampler_Foreground);
+
             struct Attributes
             {
                 float4 positionOS : POSITION;
+                float2 uv : TEXCOORD0;
             };
 
             struct Varyings
             {
                 float4 positionCS : SV_POSITION;
                 float3 positionWS : TEXCOORD0;
+                float2 uv : TEXCOORD1;
             };
 
             Varyings vert(Attributes input)
             {
                 Varyings output;
+                // Stay on the real window plane. Pushing vertices onto the near plane warps the
+                // pane and its foreground as the camera moves, and it no longer matches the room.
                 float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
                 output.positionWS = positionWS;
-                float near = max(_ProjectionParams.y + 0.001, _ProjectionParams.y * 1.01);
-                float3 cameraForward = mul((float3x3)UNITY_MATRIX_I_V, float3(0.0, 0.0, -1.0));
-                float3 offset = positionWS - _WorldSpaceCameraPos.xyz;
-                float inFront = dot(offset, cameraForward);
-                if (inFront < near)
-                {
-                    if (inFront > 0.05)
-                        positionWS = _WorldSpaceCameraPos.xyz + offset * (near / inFront);
-                    else
-                        positionWS = _WorldSpaceCameraPos.xyz + cameraForward * near + (offset - cameraForward * inFront);
-                }
+                output.uv = TRANSFORM_TEX(input.uv, _Foreground);
                 output.positionCS = TransformWorldToHClip(positionWS);
                 return output;
             }
 
-            half4 frag(Varyings input) : SV_Target
+            struct FragOut
+            {
+                half4 color : SV_Target;
+                float depth : SV_Depth;
+            };
+
+            FragOut frag(Varyings input)
             {
                 float3 normalWS = normalize(TransformObjectToWorldNormal(float3(0, 0, -1)));
                 float3 viewWS = GetWorldSpaceNormalizeViewDir(input.positionWS);
@@ -83,7 +93,23 @@ Shader "RoomWindow/Glass"
 
                 float3 rgb = _Tint.rgb * fresnel + probe * fresnel * _ReflectionStrength;
                 float alpha = saturate(_Opacity + fresnel * _ReflectionStrength);
-                return half4(rgb, alpha);
+
+                half4 front = SAMPLE_TEXTURE2D(_Foreground, sampler_Foreground, input.uv);
+                float cover = saturate(front.a);
+                float outAlpha = cover + alpha * (1.0 - cover);
+                float3 outRgb = (front.rgb * cover + rgb * alpha * (1.0 - cover)) / max(outAlpha, 1e-4);
+
+                FragOut output;
+                output.color = half4(outRgb, outAlpha);
+                // Same plane as the interior, one step closer, so the pane stays on top
+                // without fighting the room as the camera moves.
+                float planeDepth = WindowPlaneDeviceDepth(input.positionCS, input.positionCS.z);
+#if UNITY_REVERSED_Z
+                output.depth = min(planeDepth + 2.0e-5, 1.0);
+#else
+                output.depth = max(planeDepth - 2.0e-5, 0.0);
+#endif
+                return output;
             }
             ENDHLSL
         }

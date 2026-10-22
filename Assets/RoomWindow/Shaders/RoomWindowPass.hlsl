@@ -2,6 +2,7 @@
 #define ROOM_WINDOW_PASS_INCLUDED
 
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "RoomWindowPlane.hlsl"
 
 CBUFFER_START(UnityPerMaterial)
     float4 _BaseColor;
@@ -114,7 +115,8 @@ float4 ClipPosition(float3 positionOS)
 {
     // A rotated camera's near plane slices this flat quad. Vertices that cross it are
     // placed on the near plane along the same view ray, so the window keeps its coverage.
-    // The fragment still receives the real glass point.
+    // The fragment still receives the real glass point, and it writes that plane's depth
+    // so the push cannot bury the glass layer.
     float3 positionWS = TransformObjectToWorld(positionOS);
     float near = max(_ProjectionParams.y + 0.001, _ProjectionParams.y * 1.01);
     float3 cameraForward = mul((float3x3)UNITY_MATRIX_I_V, float3(0.0, 0.0, -1.0));
@@ -629,7 +631,7 @@ half3 SampleBackRoomColor(float2 meshUv, float blend)
     return lerp(litA, litB, blend);
 }
 
-half4 frag(Varyings input) : SV_Target
+half4 FragColor(Varyings input)
 {
 #ifdef ROOM_DEPTH_ONLY
     return 0;
@@ -747,6 +749,22 @@ half4 frag(Varyings input) : SV_Target
 
     return half4(color * _BaseColor.rgb, _BaseColor.a);
 #endif
+}
+
+struct FragOut
+{
+    half4 color : SV_Target;
+    float depth : SV_Depth;
+};
+
+FragOut frag(Varyings input)
+{
+    FragOut output;
+    output.color = FragColor(input);
+    // Raster depth follows the near-plane push. The glass is the unpushed plane, so the
+    // card has to record that same plane or it wins the depth test as the camera moves.
+    output.depth = WindowPlaneDeviceDepth(input.positionCS, input.positionCS.z);
+    return output;
 }
 
 #endif
